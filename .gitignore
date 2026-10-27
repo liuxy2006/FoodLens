@@ -1,0 +1,46 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Datasets
+data/*
+!data/README.md
+
+# Model weights
+checkpoints/
+weights/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Experiment outputs
+outputs/
+runs/
+logs/
+wandb/
+
+# Operating system
+.DS_Store
+Thumbs.db
+desktop.ini
