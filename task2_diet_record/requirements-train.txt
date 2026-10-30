@@ -1,4 +1,5 @@
 # 在 Colab NVIDIA GPU 运行时安装；保留 Colab 配套的 CUDA PyTorch 并记录实际版本。
+# 请通过 python -m task2_diet_record.colab_dependencies --output <新目录> 安装。
 transformers==4.51.3
 peft==0.15.2
 accelerate==1.6.0
