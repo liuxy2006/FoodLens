@@ -1,4 +1,4 @@
-"""失败预测按空原料集合、全零数值计入主指标；另报有效子集指标。"""
+"""分别报告合法预测指标与预先约定的失败补值指标。"""
 import argparse
 import json
 import re
@@ -24,6 +24,18 @@ def precision_recall_f1(tp, fp, fn):
     return {'precision': precision, 'recall': recall, 'f1': f1}
 
 
+def matched_item_weight_errors(prediction, target):
+    """仅匹配到的原料重量诊断；重名重量相加，不替代原料 F1/五项 MSE。"""
+    def weights(record):
+        result = {}
+        for item in record['items']:
+            name = normalize_name(item['name'])
+            result[name] = result.get(name, 0.0) + item['weight_g']
+        return result
+    predicted, true = weights(prediction), weights(target)
+    return [predicted[name] - true[name] for name in sorted(predicted.keys() & true.keys())]
+
+
 def evaluate_predictions(predictions, targets):
     if len(predictions) != len(targets) or not targets:
         raise ValueError('predictions and targets must have equal non-zero length')
@@ -31,12 +43,16 @@ def evaluate_predictions(predictions, targets):
     macro = dict.fromkeys(('precision', 'recall', 'f1'), 0.0)
     squared = dict.fromkeys(NUMERIC_FIELDS, 0.0)
     valid_squared = squared.copy()
+    valid_counts = [0, 0, 0]
+    valid_macro = macro.copy()
+    weight_errors = []
     failures = []
     for index, (text, target) in enumerate(zip(predictions, targets)):
         errors = validate_record(target)
         if errors:
             raise ValueError(f'invalid ground truth {index}: {errors}')
         prediction = None
+        is_valid = False
         try:
             prediction = parse_output(text)
             parsed += 1
@@ -44,6 +60,7 @@ def evaluate_predictions(predictions, targets):
             if errors:
                 raise ValueError('; '.join(errors))
             valid += 1
+            is_valid = True
         except (ValueError, TypeError) as exc:
             failures.append({'index': index, 'error': str(exc)})
             prediction = {'items': [], **dict.fromkeys(NUMERIC_FIELDS, 0.0)}
@@ -51,10 +68,15 @@ def evaluate_predictions(predictions, targets):
         tp += counts[0]; fp += counts[1]; fn += counts[2]
         for key, value in precision_recall_f1(*counts).items():
             macro[key] += value
+            if is_valid:
+                valid_macro[key] += value
+        if is_valid:
+            valid_counts = [a + b for a, b in zip(valid_counts, counts)]
+            weight_errors.extend(matched_item_weight_errors(prediction, target))
         for field in NUMERIC_FIELDS:
             error = (prediction[field] - target[field]) ** 2
             squared[field] += error
-            if not failures or failures[-1]['index'] != index:
+            if is_valid:
                 valid_squared[field] += error
     n = len(targets)
     return {'samples': n, 'json_parse_rate': parsed / n, 'schema_valid_rate': valid / n,
@@ -64,6 +86,26 @@ def evaluate_predictions(predictions, targets):
             'counts': {'tp': tp, 'fp': fp, 'fn': fn},
             'mse_all_zero_fallback': {key: value / n for key, value in squared.items()},
             'mse_valid_only': {key: value / valid if valid else None for key, value in valid_squared.items()},
+            'valid_only': {
+                'denominator': valid,
+                'micro': precision_recall_f1(*valid_counts) if valid else None,
+                'macro': {key: value / valid for key, value in valid_macro.items()} if valid else None,
+                'mse': {key: value / valid if valid else None for key, value in valid_squared.items()}},
+            'all_samples_with_failure_policy': {
+                'denominator': n, 'policy': 'invalid/missing prediction -> empty items and zero numeric values',
+                'micro': precision_recall_f1(tp, fp, fn),
+                'macro': {key: value / n for key, value in macro.items()},
+                'mse_zero_imputation': {key: value / n for key, value in squared.items()}},
+            'metric_definitions': {
+                'rate_denominator': n,
+                'valid_only_denominator': valid,
+                'micro': 'pooled TP/FP/FN; macro: arithmetic mean over selected images',
+                'legacy_fields': 'micro/macro use all samples; mse_all_zero_fallback is imputed, not unconditional nutrition MSE'},
+            'matched_item_weight_diagnostic': {
+                'matched_ingredient_pairs': len(weight_errors),
+                'mae_g': sum(abs(e) for e in weight_errors) / len(weight_errors) if weight_errors else None,
+                'mse_g2': sum(e * e for e in weight_errors) / len(weight_errors) if weight_errors else None,
+                'scope': 'schema-valid predictions and matched normalized names only; unmatched items excluded'},
             'failures': failures}
 
 

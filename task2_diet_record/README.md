@@ -1,5 +1,10 @@
 # 成员 C：第一阶段
 
+> **2026-10-29 第二阶段更新：训练已迁移到 Google Colab NVIDIA GPU。**
+> 优先使用 [Colab 运行说明](../colab/README.md) 和 `colab/member_c_train.ipynb`。
+> 下方本地 CPU/XPU 训练准备段是第一阶段历史方案，不再作为当前执行步骤；本地仅运行无需 GPU 的测试。
+> 当前新增了可恢复断点与保存重载检查，但真实 GPU 结果须在 Colab 执行后报告。
+
 所有命令在 `D:\nnproject` 执行。原始数据只读，默认数据根目录为 `data`。
 当前实现范围是数据检查、评价、营养基线、可配置的 LoRA 训练框架和真实推理接口。
 尚未安装训练依赖、下载权重或训练视觉语言模型，不能报告模型准确率。
@@ -60,9 +65,12 @@ micro 先累加整个数据集 TP/FP/FN，再算 Precision、Recall、F1；macro
 
 MSE 对五个字段独立计算，单位分别为 g²、kcal²、g²、g²、g²，不把不同量纲直接平均。
 JSON 解析率、Schema 合法率的分母都是全部应预测样本。
-失败、缺失或 Schema 非法的预测统一视为空原料集合和全零营养，进入主指标 `mse_all_zero_fallback`。
+失败、缺失或 Schema 非法的预测统一视为空原料集合和全零营养，进入明确标注为失败补值的 `mse_all_zero_fallback`，它不能无条件称为标准营养预测 MSE。
 这是一种明确、可复现的失败处理规则，不声称零值是科学估计；必须同时报告失败率。
-另提供 `mse_valid_only` 作为诊断，不能用它替代主指标掩盖失败；没有合法预测时该项为 null。
+`valid_only` 分别报告合法预测的 micro/macro F1 和五项 MSE，分母为合法预测数量；必须同时报告失败率。
+`all_samples_with_failure_policy` 使用全部样本，明确写出空原料和全零营养的失败处理规则。
+保留第一阶段字段作为兼容别名；没有合法预测时，有效子集指标为 null。
+按匹配原料计算的重量 MAE/MSE 仅为附加诊断，会遗漏未匹配原料，不能替代教师规定的指标。
 严格拒绝重复 JSON key、NaN/Infinity、负数、额外字段和非 JSON 解释文本；允许完整 JSON 的单个 Markdown 围栏。
 
 预测文件每行 `{"dish_id":"...","prediction":"模型原始文本"}`；推理失败 prediction 为 null 并记录 error。
@@ -139,7 +147,7 @@ python -m evaluation.diet_metrics --annotations data/raw/annotations/val.jsonl -
 只读 train/val，按 val loss 保存 best；生成验证可选，用于监控实际输出。
 日志保存配置、库版本、模型解析 revision、标注 SHA256、样本数、训练/验证损失和可选生成指标。
 已有实验目录会被拒绝覆盖；best/last 在同一实验内部按训练进度更新。
-保存 adapter、Processor 和优化器快照；当前没有断点恢复入口，恢复训练功能留到下一阶段。
+第二阶段已新增 `--resume` 完整断点恢复，详见 Colab 文档；断点包含 adapter、Processor、优化器、随机状态和样本游标。
 CPU 浮点和训练随机性并不保证跨设备完全一致，务必保存运行日志。
 锁定方案之后再把推理/评价命令中的 val 改成 test 做最终测试，禁止用 test 调参。
 

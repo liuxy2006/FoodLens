@@ -2,7 +2,7 @@
 from .interfaces import user_messages
 
 
-def load_backbone(model_path, device='cpu', revision=None, allow_download=False):
+def load_backbone(model_path, device='cpu', revision=None, allow_download=False, processor_path=None):
     import torch
     from transformers import AutoProcessor, AutoModelForVision2Seq
     if device == 'cuda' and not torch.cuda.is_available():
@@ -10,13 +10,32 @@ def load_backbone(model_path, device='cpu', revision=None, allow_download=False)
     if device == 'xpu' and not (hasattr(torch, 'xpu') and torch.xpu.is_available()):
         raise RuntimeError('Intel XPU unavailable; use CPU or a supported training host')
     kwargs = {'local_files_only': not allow_download, 'revision': revision}
-    processor = AutoProcessor.from_pretrained(model_path, **kwargs)
+    processor = AutoProcessor.from_pretrained(processor_path or model_path, **kwargs)
     processor.tokenizer.padding_side = 'right'
     model = AutoModelForVision2Seq.from_pretrained(model_path, torch_dtype=torch.float32,
                                                  attn_implementation='eager', **kwargs)
     # 默认 float32，CPU/Intel 环境不假设支持 CUDA 量化或半精度。
     model.to(device)
     return model, processor
+
+
+def configure_lora(model, config, adapter=None):
+    """训练与恢复使用同一 LoRA 配置，恢复时显式允许训练参数。"""
+    from peft import LoraConfig, PeftModel, get_peft_model
+    targets = [name for name, _ in model.named_modules()
+               if 'text_model' in name and name.endswith(('.q_proj', '.v_proj'))]
+    if not targets:
+        raise ValueError('no supported SmolVLM text attention targets found')
+    if adapter:
+        model = PeftModel.from_pretrained(model, adapter, is_trainable=True, local_files_only=True)
+    else:
+        model = get_peft_model(model, LoraConfig(
+            r=config['lora_r'], lora_alpha=config['lora_alpha'], lora_dropout=config['lora_dropout'],
+            target_modules=targets, task_type='CAUSAL_LM', bias='none'))
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+    model.config.use_cache = False
+    return model, targets
 
 
 def answer_start(full_ids, prompt_ids):

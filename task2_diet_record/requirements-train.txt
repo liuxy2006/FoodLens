@@ -1,5 +1,7 @@
-# 建议单独 Python 3.11 环境；PyTorch 需按 CPU/CUDA/XPU 主机选择官方安装方式。
+# 在 Colab NVIDIA GPU 运行时安装；保留 Colab 配套的 CUDA PyTorch 并记录实际版本。
 transformers==4.51.3
 peft==0.15.2
 accelerate==1.6.0
 safetensors>=0.5,<1
+huggingface-hub==0.30.2
+tokenizers==0.21.4

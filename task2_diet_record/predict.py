@@ -27,9 +27,16 @@ def main():
     parser.add_argument('--data-root', default='data')
     parser.add_argument('--device', default='cpu', choices=['cpu', 'cuda', 'xpu'])
     parser.add_argument('--output', required=True)
+    parser.add_argument('--limit', type=int, help='仅用于小样本集成测试')
+    parser.add_argument('--max-new-tokens', type=int, default=1024)
     args = parser.parse_args()
     model = TransformersDietModel.from_pretrained(args.model_path, args.adapter, args.device)
     rows = read_annotations(args.annotations)
+    if args.limit is not None:
+        if args.limit <= 0:
+            parser.error('--limit must be positive')
+        rows = rows[:args.limit]
+    model.max_new_tokens = args.max_new_tokens
     predictions = predict_records(model, rows, args.data_root)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     with Path(args.output).open('x', encoding='utf-8') as stream:
