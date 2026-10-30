@@ -1,5 +1,6 @@
 """SmolVLM 多模态加载、仅答案监督的批处理。依赖按需导入。"""
 from .interfaces import user_messages
+from .schema import parse_output
 
 
 def load_backbone(model_path, device='cpu', revision=None, allow_download=False, processor_path=None):
@@ -47,9 +48,17 @@ def answer_start(full_ids, prompt_ids):
     return len(prompt_ids)
 
 
+def verify_answer_text(decoded, expected):
+    """核对真实被监督的 token 解码结果，不能仅凭 loss 有限判断标签正确。"""
+    if parse_output(decoded) != parse_output(expected):
+        raise ValueError('supervised token text differs from JSON target')
+
+
 class SupervisedCollator:
-    def __init__(self, processor, max_length=4096):
+    def __init__(self, processor, max_length=4096, verify_answers=False):
         self.processor, self.max_length = processor, max_length
+        self.verify_answers = verify_answers
+        self.last_answer_audit = []
 
     def __call__(self, examples):
         prompts, texts = [], []
@@ -59,8 +68,10 @@ class SupervisedCollator:
             messages = messages + [{'role': 'assistant', 'content': [{'type': 'text', 'text': row['target_text']}]}]
             texts.append(self.processor.apply_chat_template(messages, add_generation_prompt=False))
         images = [[row['image']] for row in examples]
-        batch = self.processor(text=texts, images=images, padding=True, return_tensors='pt')
-        prefix = self.processor(text=prompts, images=images, padding=True, return_tensors='pt')
+        if getattr(getattr(self.processor, 'tokenizer', None), 'padding_side', 'right') != 'right':
+            raise ValueError('supervised collator requires right padding')
+        batch = self.processor(text=texts, images=images, padding=True, truncation=False, return_tensors='pt')
+        prefix = self.processor(text=prompts, images=images, padding=True, truncation=False, return_tensors='pt')
         if batch['input_ids'].shape[1] > self.max_length:
             raise ValueError('sequence too long; increase max_length instead of truncating image/answer tokens')
         labels = batch['input_ids'].clone()
@@ -70,5 +81,13 @@ class SupervisedCollator:
             start = answer_start(full_ids, prompt_ids)
             labels[i, :start] = -100
         labels[batch['attention_mask'] == 0] = -100
+        self.last_answer_audit = []
+        if self.verify_answers:
+            for i, row in enumerate(examples):
+                ids = labels[i][labels[i] != -100].tolist()
+                decoded = self.processor.tokenizer.decode(ids, skip_special_tokens=True)
+                verify_answer_text(decoded, row['target_text'])
+                self.last_answer_audit.append({'decoded_supervision': decoded, 'matches_target': True,
+                                               'supervised_tokens': len(ids)})
         batch['labels'] = labels
         return batch

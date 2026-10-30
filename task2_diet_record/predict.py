@@ -6,12 +6,15 @@ from .data import read_annotations, image_path
 from .interfaces import TransformersDietModel
 
 
-def predict_records(model, records, data_root):
+def predict_records(model, records, data_root, include_generation_info=False):
     results = []
     for row in records:
         try:
             text = model.predict(image_path(data_root, row['image']))
-            results.append({'dish_id': row['dish_id'], 'prediction': text})
+            result = {'dish_id': row['dish_id'], 'prediction': text}
+            if include_generation_info:
+                result['generation'] = getattr(model, 'last_generation', {}).copy()
+            results.append(result)
         except Exception as exc:
             # 不漏掉失败样本；错误进入日志，评价器将 None 计入失败。
             results.append({'dish_id': row['dish_id'], 'prediction': None,

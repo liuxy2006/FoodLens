@@ -1,7 +1,13 @@
 # 成员 C：Colab GPU 工作流
 
+## 当前阶段：16 图格式学习验证
+
+用户已反馈 `8b06fd88…` 在 T4 完成两步真实集成测试，但 Schema 合法率仍为 0。
+下一步使用独立 [Schema 实验 Notebook](member_c_schema_overfit.ipynb) 和 [操作与诊断说明](SCHEMA_EXPERIMENT.md)，先 25 步、人工审查后最多 100 步。
+不要重跑或覆盖已有 smoke 目录。该实验的训练子集评价只表示记忆能力；目前尚无这轮小实验的 GPU 结果。
+
 入口为 [member_c_train.ipynb](member_c_train.ipynb)。本地只开发和运行不需要 GPU 的测试；所有后续视觉模型推理与训练在 Colab NVIDIA GPU 进行。
-Notebook 调用仓库模块，不复制训练循环。当前没有实际 Colab GPU 运行结果，不能声称 LoRA 已训练成功。
+Notebook 调用仓库模块，不复制训练循环。下面保留初期集成测试的运行说明；两步训练链路已由用户实际运行验证，不代表 Schema 学习通过或正式模型精度。
 
 ## 本地已执行的检查
 

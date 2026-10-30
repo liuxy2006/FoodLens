@@ -3,9 +3,12 @@ from typing import Protocol, Callable
 from pathlib import Path
 from .data import load_image
 
-PROMPT = ('Estimate the ingredients and nutrition in this food image. Return only a JSON object '
-          'with items (each containing name and weight_g), total_weight_g, total_calories_kcal, '
-          'protein_g, fat_g, carbohydrate_g. Use nonnegative numbers. Do not add other fields.')
+PROMPT = ('Estimate the ingredients and nutrition in this food image. Return only one JSON object. '
+          'Use exactly these top-level keys: "items", "total_weight_g", "total_calories_kcal", '
+          '"protein_g", "fat_g", "carbohydrate_g". "items" must be an array of objects, each '
+          'with exactly "name" (a nonempty string) and "weight_g" (a nonnegative JSON number). '
+          'All five top-level nutrition/weight values must be nonnegative JSON numbers, not strings. '
+          'Do not rename keys, add fields, or include explanations or Markdown.')
 
 
 class DietModel(Protocol):

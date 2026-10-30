@@ -8,6 +8,22 @@ from .data import DietDataset
 from .vlm import SupervisedCollator, load_backbone, configure_lora
 from .checkpoint import (file_sha256, inspect_checkpoint, validate_resume_signature,
                          save_checkpoint, restore_training_state)
+from .interfaces import PROMPT
+from .monitoring import monitor_step, validation_loss
+
+
+def validate_experiment(config, train_limit, max_steps):
+    if config.get('experiment_kind') == 'schema_overfit':
+        if train_limit != 16 or max_steps is None or not 1 <= max_steps <= config['maximum_optimizer_steps']:
+            raise ValueError('schema overfit requires train-limit=16 and a total step cap of at most 100')
+        if config['maximum_optimizer_steps'] != 100:
+            raise ValueError('do not raise the overfit cap; diagnose schema failure first')
+        import math
+        budget = config['epochs'] * math.ceil(math.ceil(train_limit / config['batch_size']) / config['gradient_accumulation'])
+        if budget < max_steps:
+            raise ValueError(f'configured epochs only provide {budget} optimizer steps, less than requested {max_steps}')
+    if config.get('experiment_kind') == 'full_one_epoch_exploration' and config['epochs'] != 1:
+        raise ValueError('exploratory full-data training must use exactly one epoch')
 
 
 def verify_update(parameters, before):
@@ -38,6 +54,9 @@ def main():
     parser.add_argument('--checkpoint-every', type=int, default=100)
     parser.add_argument('--verify-update', action='store_true')
     parser.add_argument('--verify-reload', action='store_true', help='保存前后对同一验证图片作确定性推理')
+    parser.add_argument('--generate-train', type=int, default=0, help='固定训练子集的生成评价，不能当成泛化成绩')
+    parser.add_argument('--eval-every', type=int, default=0, help='优化器步间隔；0 保留原有轮末监控')
+    parser.add_argument('--evaluate-start', action='store_true', help='更新前记录生成基线')
     args = parser.parse_args()
     if args.allow_download and (not args.revision or len(args.revision) != 40):
         parser.error('online download requires a full 40-character revision SHA')
@@ -48,6 +67,9 @@ def main():
         parser.error('smoke-test limits must be positive')
     if args.train_limit is not None and args.train_limit <= 0 or args.checkpoint_every <= 0 or args.generate_val < 0:
         parser.error('invalid sample/checkpoint limits')
+    if args.generate_train < 0 or args.eval_every < 0 or args.generate_train and not args.eval_every:
+        parser.error('train generation monitoring requires a positive --eval-every')
+    validate_experiment(config, args.train_limit, args.max_steps)
     import numpy as np
     try:
         import torch
@@ -68,6 +90,8 @@ def main():
     val = DietDataset(root / 'raw/annotations/val.jsonl', root, 'val')
     if args.train_limit:
         train.records = train.records[:args.train_limit]
+    if config.get('experiment_kind') == 'schema_overfit' and len(train) != 16:
+        raise ValueError('schema overfit requires exactly 16 real training samples')
     if not len(train) or not len(val):
         raise ValueError('empty train or validation set')
     output = Path(args.output)
@@ -79,16 +103,21 @@ def main():
     signature = {'config': config, 'annotation_sha256': hashes, 'train_records': len(train),
                  'val_limit': args.val_limit, 'model_revision': args.revision,
                  'model_config_sha256': file_sha256(model_config) if model_config.is_file() else None}
+    import hashlib
+    signature['prompt_sha256'] = hashlib.sha256(PROMPT.encode()).hexdigest()
+    signature['monitor_protocol'] = {'generate_train': args.generate_train, 'generate_val': args.generate_val,
+                                     'eval_every': args.eval_every}
     saved = inspect_checkpoint(args.resume) if args.resume else None
     if saved:
         validate_resume_signature(saved['signature'], signature)
         if args.max_steps and args.max_steps <= saved['optimizer_steps']:
             parser.error('--max-steps is a TOTAL step limit and must exceed restored optimizer_steps')
+    run_started = time.perf_counter()
     model, processor = load_backbone(model_path, args.device, args.revision, args.allow_download,
                                      processor_path=args.resume)
     model, targets = configure_lora(model, config, args.resume)
     model.print_trainable_parameters()
-    collate = SupervisedCollator(processor, config['max_length'])
+    collate = SupervisedCollator(processor, config['max_length'], verify_answers=args.verify_update)
     val_subset = Subset(val, range(min(args.val_limit, len(val)))) if args.val_limit else val
     val_loader = DataLoader(val_subset, batch_size=config['batch_size'], collate_fn=collate, num_workers=0,
                             generator=torch.Generator().manual_seed(config['seed']))
@@ -96,6 +125,12 @@ def main():
     if saved:
         restore_training_state(args.resume, optimizer)
     output.mkdir(parents=True)
+    def write_checkpoint(path, metadata):
+        started = time.perf_counter()
+        save_checkpoint(path, model, processor, optimizer, metadata)
+        with (output / 'checkpoint_times.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps({'step': metadata['optimizer_steps'], 'path': str(path),
+                                     'seconds': time.perf_counter() - started}) + '\n')
     import importlib.metadata
     versions = {pkg: importlib.metadata.version(pkg) for pkg in ('torch', 'transformers', 'peft', 'numpy')}
     import PIL
@@ -107,6 +142,10 @@ def main():
            'trainable_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad),
            'frozen_parameters': sum(p.numel() for p in model.parameters() if not p.requires_grad),
            'lora_targets': targets}
+    run['prompt'] = PROMPT
+    run['chat_template'] = getattr(processor, 'chat_template', None) or getattr(processor.tokenizer, 'chat_template', None)
+    run['fixed_generation_ids'] = {'train': [r['dish_id'] for r in train.records[:args.generate_train]],
+                                   'val': [r['dish_id'] for r in val.records[:args.generate_val]]}
     if args.verify_update:
         run['all_model_parameters_finite_before_training'] = all(bool(torch.isfinite(p).all()) for p in model.parameters())
         if not run['all_model_parameters_finite_before_training']:
@@ -122,6 +161,15 @@ def main():
     if start_epoch >= config['epochs']:
         raise ValueError('checkpoint already completed configured epochs')
     parameters = {name: p for name, p in model.named_parameters() if p.requires_grad}
+    evaluated = {}
+    def evaluate_at(current_step, training_loss):
+        if current_step not in evaluated:
+            evaluated[current_step] = monitor_step(
+                model, processor, val_loader, train.records[:args.generate_train], val.records[:args.generate_val],
+                root, output, current_step, training_loss, config['max_new_tokens'])
+        return evaluated[current_step]
+    if args.eval_every and args.evaluate_start:
+        evaluate_at(step, None)
     for epoch in range(start_epoch, config['epochs']):
         # 每轮顺序由独立 generator 决定，恢复时跳过已消费样本，不扰动模型 RNG。
         order = torch.randperm(len(train), generator=torch.Generator().manual_seed(config['seed'] + epoch)).tolist()
@@ -137,6 +185,7 @@ def main():
                     torch.cuda.reset_peak_memory_stats()
                 group_started = time.perf_counter()
                 before = {name: p.detach().cpu().clone() for name, p in parameters.items()} if args.verify_update else None
+                group_losses = []
             batch = {key: value.to(args.device) for key, value in batch.items()}
             if args.verify_update and batch_index == 0:
                 image_token_id = getattr(model.config, 'image_token_id', None)
@@ -148,7 +197,8 @@ def main():
                 inspection = {'pixel_values_shape': list(batch['pixel_values'].shape),
                               'image_token_count': int(image_mask.sum().item()),
                               'supervised_token_count': int((batch['labels'] != -100).sum().item()),
-                              'masked_token_count': int((batch['labels'] == -100).sum().item())}
+                              'masked_token_count': int((batch['labels'] == -100).sum().item()),
+                              'supervision_text_audit': collate.last_answer_audit}
                 (output / f'batch_inspection_epoch_{epoch+1}.json').write_text(json.dumps(inspection, indent=2), encoding='utf-8')
             loss = model(**batch).loss
             if not torch.isfinite(loss):
@@ -159,6 +209,7 @@ def main():
             group_size = min(accumulation, len(loader) - group_start)
             (loss / group_size).backward()
             train_loss += loss.item(); batches += 1
+            group_losses.append(loss.item())
             if (batch_index + 1) % accumulation == 0 or batch_index + 1 == len(loader):
                 gradient_finite = all(p.grad is None or bool(torch.isfinite(p.grad).all()) for p in parameters.values())
                 nonzero_gradient = any(p.grad is not None and bool((p.grad != 0).any()) for p in parameters.values())
@@ -169,7 +220,8 @@ def main():
                 diagnostics = verify_update(parameters, before) if args.verify_update else {}
                 if args.device == 'cuda':
                     torch.cuda.synchronize()
-                diagnostics.update(step=step, loss=loss.item(), finite_gradient=gradient_finite,
+                diagnostics.update(step=step, loss=sum(group_losses) / len(group_losses),
+                                   last_microbatch_loss=loss.item(), finite_gradient=gradient_finite,
                                    nonzero_gradient=nonzero_gradient, seconds=time.perf_counter() - group_started)
                 if args.device == 'cuda':
                     diagnostics['cuda_peak_allocated_bytes'] = torch.cuda.max_memory_allocated()
@@ -180,25 +232,24 @@ def main():
                 next_epoch = epoch + 1 if next_sample == len(train) else epoch
                 cursor = 0 if next_sample == len(train) else next_sample
                 terminal = batch_index + 1 == len(loader) or (args.max_steps and step >= args.max_steps)
+                if args.eval_every and (step % args.eval_every == 0 or args.max_steps and step >= args.max_steps):
+                    evaluate_at(step, diagnostics['loss'])
                 if step % args.checkpoint_every == 0 and not terminal:
                     checkpoint = output / f'checkpoint-{step:06d}'
-                    save_checkpoint(checkpoint, model, processor, optimizer, {
+                    write_checkpoint(checkpoint, {
                         'signature': signature, 'optimizer_steps': step, 'next_epoch': next_epoch,
                         'next_sample': cursor, 'best_val_loss': best, 'best_adapter': best_adapter})
                 if args.max_steps and step >= args.max_steps:
                     break
-        model.eval(); val_loss = 0.0; token_count = 0
-        with torch.no_grad():
-            for batch in val_loader:
-                batch = {key: value.to(args.device) for key, value in batch.items()}
-                count = (batch['labels'][:, 1:] != -100).sum().item()
-                loss = model(**batch).loss
-                if not torch.isfinite(loss):
-                    raise FloatingPointError('nonfinite validation loss')
-                val_loss += loss.item() * count; token_count += count
+        model.eval()
+        current_val_loss = evaluated[step]['val_loss'] if step in evaluated else validation_loss(model, val_loader, args.device)
+        if args.eval_every and epoch + 1 == config['epochs']:
+            current_val_loss = evaluate_at(step, diagnostics['loss'])['val_loss']
         log = {'epoch': epoch + 1, 'optimizer_steps': step, 'train_loss': train_loss / batches,
-               'val_loss': val_loss / token_count, 'time': time.time()}
-        if args.generate_val:
+               'val_loss': current_val_loss, 'time': time.time()}
+        if step in evaluated:
+            log['monitor_file'] = f'monitor/step-{step:06d}.json'
+        if args.generate_val and not args.eval_every:
             from .interfaces import TransformersDietModel
             from .predict import predict_records
             from evaluation.diet_metrics import evaluate_predictions
@@ -212,7 +263,7 @@ def main():
             model.save_pretrained(output / 'best'); processor.save_pretrained(output / 'best')
             best_adapter = str((output / 'best').resolve())
         checkpoint = output / f'checkpoint-{step:06d}'
-        save_checkpoint(checkpoint, model, processor, optimizer, {
+        write_checkpoint(checkpoint, {
             'signature': signature, 'optimizer_steps': step, 'next_epoch': next_epoch,
             'next_sample': cursor, 'best_val_loss': best, 'best_adapter': best_adapter})
         (output / 'last_checkpoint.json').write_text(json.dumps({'path': str(checkpoint.resolve())}), encoding='utf-8')
@@ -229,6 +280,7 @@ def main():
             log['cuda_peak_reserved_bytes'] = torch.cuda.max_memory_reserved()
         import psutil
         log['process_rss_bytes'] = psutil.Process().memory_info().rss
+        log['elapsed_run_seconds_including_load_eval_save'] = time.perf_counter() - run_started
         with (output / 'metrics.jsonl').open('a', encoding='utf-8') as stream:
             stream.write(json.dumps(log) + '\n')
         print(json.dumps(log))

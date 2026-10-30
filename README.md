@@ -32,6 +32,8 @@
 
 数据审计、结构化 JSON、F1/MSE、营养辅助基线及 SmolVLM LoRA 框架已建立。
 运行方式、指标约定、实际数据检查结果和训练前置条件见 [成员 C 文档](task2_diet_record/README.md)。
-当前没有已训练的成员 C 模型，接口测试结果不能作为模型实验成绩。
+成员 C 的两步 LoRA 链路已由用户在 Colab T4 验证；尚无正式训练模型，接口测试结果不能作为模型实验成绩。
 
 成员 C 的后续模型训练统一在 Google Colab NVIDIA GPU 进行，入口见 [Colab Notebook](colab/member_c_train.ipynb) 和 [运行说明](colab/README.md)。本地仅运行无需 GPU 的开发测试。
+
+当前优先执行 [16 图 Schema 学习验证](colab/member_c_schema_overfit.ipynb)：先 25 步检查，审查后最多到 100 步，详见 [实验说明](colab/SCHEMA_EXPERIMENT.md)。
