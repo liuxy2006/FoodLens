@@ -44,3 +44,9 @@ wandb/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Member C: local model downloads and processor caches
+/models/
+/cache/
+/.cache/
+*.safetensors

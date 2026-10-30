@@ -1,0 +1,7 @@
+numpy>=2.0,<3
+scipy>=1.14,<2
+Pillow>=11,<13
+jsonschema>=4.23,<5
+# 可选环境报告
+psutil>=6,<8
+# 深度学习依赖单列在 task2_diet_record/requirements-train.txt，按设备安装 PyTorch。
