@@ -3,7 +3,7 @@
 入口：[member_c_schema_overfit.ipynb](member_c_schema_overfit.ipynb)。仍在 `feat/member-c-diet-record`，审核推送后填写本次最终完整 commit SHA。
 本地只进行代码检查和 CPU 测试，不下载权重或运行模型。Notebook 延用已有 Drive ZIP 准备、CUDA 保护与固定 SmolVLM revision。
 
-本次本地实际执行 `python -m unittest discover -s tests`，81 项测试通过；两份 Notebook 的 nbformat 与全部代码单元语法校验通过。曲线渲染测试只使用人工夹具，不是模型成绩。
+本轮恢复修复后，本地实际执行 `python -m unittest discover -s tests`，94 项测试通过；两份 Notebook 的 nbformat 与全部代码单元语法校验通过。曲线渲染和恢复流程测试只使用人工夹具，不是模型成绩。
 检查时本地 `data/raw/annotations/train.jsonl` 不存在，未独立复核这次真实 16 条标注；真实数据与监督 token 的核对会在 Colab 数据准备及训练检查中执行。新一轮 25/100 步尚未运行。
 
 ## 已知证据与检查结论
@@ -50,6 +50,36 @@ python -m task2_diet_record.schema_experiment --model-path <同一模型目录> 
 ```
 
 断线时可恢复本实验较早的完整断点，但步数上限仍是 25 或 100；数据、配置、提示词哈希和监控协议不匹配会被拒绝。
+
+### 跨 Colab 会话复用已经完成的 25 步实验
+
+每次会话仍然创建新的 `RUN_ROOT`，作为本次输出位置，不改写原实验。数据和固定版本模型准备完毕后，在「先做 25 步检查」单元填写：
+
+```python
+EXISTING_STAGE25_DIR = "/content/drive/MyDrive/FoodLens/outputs/schema_overfit_<旧运行ID>/schema_step25"
+OVERFIT_RESUME = ""
+```
+
+请填写 **schema_step25 目录**，不要填写它的父目录或 checkpoint 子目录。Notebook 将只读检查 `last_checkpoint.json`、完整断点、运行记录、25 步监控报告和训练日志，确认断点确实为第 25 步。
+随后与当前文件核对完整训练配置、train/val 标注 SHA256、模型 revision/config SHA256、提示词哈希及固定监控协议。任何不匹配或损坏都会停止，不自动替换配置、重写路径或重训旧目录。
+
+校验通过时，`STAGE25` 指向这个旧目录，跳过 25 步训练；曲线和原文从旧实验读取，但新生成的曲线保存在本次 `RUN_ROOT/curves25`。
+重新查看这些结果，然后手动设置 `CONTINUE_TO_100=True` 并填写 `REVIEW_NOTE`。恢复入口会再次校验旧断点，新训练结果写入 **本次** `RUN_ROOT/schema_step100`，目标仍为**总计 100 步**，即从 25 步再更新 75 步。
+
+两个参数都留空时，原默认行为不变：从预训练模型新建 LoRA 并训练 25 步。
+若旧实验尚未完成 25 步，则只填原来的 `OVERFIT_RESUME` 完整断点路径，继续补足到 25 步；它与 `EXISTING_STAGE25_DIR` 不能同时指定。
+若 Google Drive 中旧目录被移动/重命名，保存的绝对 checkpoint 指针可能失效，工具会报错，不会自动改写旧结果；优先使用原始保存路径。
+
+也可直接在 Colab 命令行继续已完成的 25 步实验：
+
+```bash
+python -m task2_diet_record.schema_experiment --model-path <同一模型目录> --revision <同一模型SHA> \
+  --data-root /content/foodlens_data --stage 100 \
+  --existing-stage25-dir <旧schema_step25目录> --output <本次新目录>/schema_step100
+```
+
+`--existing-stage25-dir` 和 `--resume` 互斥；该命令不会覆盖已有输出目录，也不接受 smoke/full-data 或已经到 100 步的实验。
+
 生成评价使用 max_new_tokens=1024、do_sample=False，记录生成 token 数和是否到达上限；不设置约束解码或修复输出，便于观察模型本身是否学会字段。
 25 步和 100 步分别用新目录。Notebook 根目录为 `FoodLens/outputs/schema_overfit_<运行ID>/`，不会改写旧 pretrained_inference/smoke_step1/smoke_resumed/val_metrics。
 
