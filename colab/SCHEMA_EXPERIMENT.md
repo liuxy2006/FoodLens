@@ -1,5 +1,7 @@
 # 16 图 Schema 学习验证
 
+> 新阶段：用户已报告 25 步后 Schema 仍为 0 且提示词复述增加。先运行 [提示词诊断入口](member_c_prompt_diagnostics.ipynb) 和 [诊断说明](PROMPT_DIAGNOSTICS.md)，完成完整 token/16 图监督审计及零样本对照，再决定是否继续。不要只凭 loss 下降开启 100 步。
+
 入口：[member_c_schema_overfit.ipynb](member_c_schema_overfit.ipynb)。仍在 `feat/member-c-diet-record`，审核推送后填写本次最终完整 commit SHA。
 本地只进行代码检查和 CPU 测试，不下载权重或运行模型。Notebook 延用已有 Drive ZIP 准备、CUDA 保护与固定 SmolVLM revision。
 

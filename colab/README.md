@@ -1,5 +1,7 @@
 # 成员 C：Colab GPU 工作流
 
+当前优先定位 25 步后的提示词复述：[无训练诊断 Notebook](member_c_prompt_diagnostics.ipynb)、[完整诊断说明](PROMPT_DIAGNOSTICS.md)。该入口先审计全部 16 张训练图，再做固定 4 图 A/B/C 零样本对照，不自动训练。
+
 ## 当前阶段：16 图格式学习验证
 
 用户已反馈 `8b06fd88…` 在 T4 完成两步真实集成测试，但 Schema 合法率仍为 0。

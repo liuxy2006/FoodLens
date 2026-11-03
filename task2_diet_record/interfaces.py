@@ -31,14 +31,22 @@ class CaptionDietAdapter:
         return self.extractor(self.caption_model.caption(Path(image)))
 
 
-def user_messages():
-    return [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': PROMPT}]}]
+def user_messages(prompt=PROMPT):
+    return [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': prompt}]}]
+
+
+def image_prompt_inputs(processor, image, prompt=PROMPT):
+    """保持官方的先渲染聊天模板、再传图片给 Processor 的调用方式。"""
+    rendered = processor.apply_chat_template(user_messages(prompt), add_generation_prompt=True)
+    return rendered, processor(text=[rendered], images=[[image]], truncation=False, return_tensors='pt')
 
 
 class TransformersDietModel:
-    def __init__(self, model, processor, max_new_tokens=1024):
+    def __init__(self, model, processor, max_new_tokens=1024, prompt=PROMPT, capture_trace=False):
         self.model, self.processor = model, processor
         self.max_new_tokens = max_new_tokens
+        self.prompt, self.capture_trace = prompt, capture_trace
+        self.last_trace = None
 
     @classmethod
     def from_pretrained(cls, model_path, adapter=None, device='cpu', revision=None):
@@ -51,17 +59,35 @@ class TransformersDietModel:
 
     def predict(self, image):
         import torch
+        from .generation_trace import check_generation_boundary, trace_generation, eos_ids
+        self.last_trace = None
+        self.last_generation = {}
         rgb = load_image(image)
         try:
-            prompt = self.processor.apply_chat_template(user_messages(), add_generation_prompt=True)
-            inputs = self.processor(text=[prompt], images=[[rgb]], return_tensors='pt')
+            rendered, inputs = image_prompt_inputs(self.processor, rgb, self.prompt)
             inputs = inputs.to(self.model.device)
             self.model.eval()
             with torch.no_grad():
                 generated = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens,
                                                 do_sample=False, use_cache=True)
+            generated = getattr(generated, 'sequences', generated)
+            input_ids, output_ids = inputs['input_ids'][0].tolist(), generated[0].tolist()
+            if self.capture_trace:
+                self.last_trace = trace_generation(self.processor.tokenizer, input_ids, output_ids,
+                                                   rendered, self.prompt, eos_ids(self.model))
+                self.last_trace['pixel_values_shape'] = list(inputs['pixel_values'].shape)
+                generation_config = getattr(self.model, 'generation_config', None)
+                self.last_trace['generation_config'] = {key: getattr(generation_config, key, None)
+                    for key in ('eos_token_id', 'bos_token_id', 'pad_token_id', 'num_beams', 'return_dict_in_generate')}
+                self.last_trace['other_eos_sources'] = {
+                    'model_config': getattr(self.model.config, 'eos_token_id', None),
+                    'text_config': getattr(getattr(self.model.config, 'text_config', None), 'eos_token_id', None),
+                    'tokenizer': getattr(self.processor.tokenizer, 'eos_token_id', None)}
+            # 只在完整 token 前缀严格一致时按长度截取，不用字符串删除提示词。
+            check_generation_boundary(input_ids, output_ids)
         finally:
             rgb.close()
         count = generated.shape[1] - inputs['input_ids'].shape[1]
-        self.last_generation = {'generated_tokens': count, 'reached_token_limit': count >= self.max_new_tokens}
+        self.last_generation = {'generated_tokens': count, 'reached_token_limit': count >= self.max_new_tokens,
+                                'input_tokens': len(input_ids), 'input_prefix_matches': True}
         return self.processor.batch_decode(generated[:, inputs['input_ids'].shape[1]:], skip_special_tokens=True)[0]
